@@ -1,0 +1,39 @@
+{
+  "ideas": [
+    {
+      "id": "tool-elimination",
+      "title": "Replace MCP tools with structured outputs",
+      "description": "Use output_format instead of MCP tool calls for agent-to-state communication. Inject context via prompts, get structured output, persist in node functions.",
+      "status": "completed",
+      "task_file": "tasks/tool_elimination.md"
+    },
+    {
+      "id": "langgraph-state",
+      "title": "Use LangGraph state for ephemeral data",
+      "description": "Move data that doesn't need permanent storage into LangGraph state instead of file I/O. Examples: current bug being processed, entrypoints queue, in-progress classifications.",
+      "status": "completed",
+      "task_file": "tasks/langgraph-state.md"
+    },
+    {
+      "id": "checkpoints",
+      "title": "Add SQLite checkpointing",
+      "description": "Use LangGraph's checkpoint system with SQLite backend to enable resume-from-failure, state history, and debugging capabilities.",
+      "status": "planned",
+      "task_file": "tasks/checkpoints.md"
+    },
+    {
+      "id": "subgraph-generalization",
+      "title": "Extract TDD subgraph as reusable pattern",
+      "description": "The reproduce → fix → refactor → review sequence is a general TDD pattern. Extract it as a subgraph that can be parameterized for different task types beyond bug fixing.",
+      "status": "idea",
+      "task_file": null
+    },
+    {
+      "id": "repo-management",
+      "title": "Self-managed repository cloning",
+      "description": "Accept a repository URL as input and clone it to a temp location if not already available. This decouples the agent's work from existing local directories that may be used for other purposes, ensuring isolated and reproducible workflows.",
+      "status": "idea",
+      "task_file": null
+    }
+  ]
+}

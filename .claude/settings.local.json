@@ -1,0 +1,14 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(test-driven-development)",
+      "Skill(testing-anti-patterns)",
+      "Skill(claude-agent-sdk)",
+      "Skill(brainstorming)",
+      "WebFetch(domain:langchain-ai.github.io)",
+      "WebFetch(domain:docs.langchain.com)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}

@@ -1,0 +1,23 @@
+[project]
+name = "code-agent"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Florian Müller", email = "florian@tomueller.de" }
+]
+requires-python = ">=3.11"
+dependencies = [
+    "claude-agent-sdk>=0.1.9",
+    "langgraph>=1.0.3",
+    "langgraph-checkpoint-sqlite>=3.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.9.4,<0.10.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.1",
+]
