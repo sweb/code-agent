@@ -10,7 +10,7 @@ def test_clear_removes_all_entrypoints():
     with tempfile.TemporaryDirectory() as tmpdir:
         entrypoints_path = os.path.join(tmpdir, "entrypoints.json")
         with open(entrypoints_path, "w") as f:
-            json.dump(["path/to/file1.py", "path/to/file2.py"], f)
+            json.dump({"entrypoints": ["path/to/file1.py", "path/to/file2.py"]}, f)
 
         notebook = BugHunterNotebook(path=tmpdir)
 
@@ -18,7 +18,7 @@ def test_clear_removes_all_entrypoints():
 
         assert notebook.entrypoints == []
         with open(entrypoints_path, "r") as f:
-            assert json.load(f) == []
+            assert json.load(f) == {"entrypoints": []}
 
 
 def test_clear_removes_potential_and_in_analysis_bugs():
@@ -137,7 +137,7 @@ def test_cli_clear_command():
     with tempfile.TemporaryDirectory() as tmpdir:
         entrypoints_path = os.path.join(tmpdir, "entrypoints.json")
         with open(entrypoints_path, "w") as f:
-            json.dump(["path/to/file.py"], f)
+            json.dump({"entrypoints": ["path/to/file.py"]}, f)
 
         bugs_data = {
             "bugs": {
