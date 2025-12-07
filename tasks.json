@@ -18,15 +18,15 @@
       "id": "checkpoints",
       "title": "Add SQLite checkpointing",
       "description": "Use LangGraph's checkpoint system with SQLite backend to enable resume-from-failure, state history, and debugging capabilities.",
-      "status": "planned",
+      "status": "completed",
       "task_file": "tasks/checkpoints.md"
     },
     {
       "id": "subgraph-generalization",
       "title": "Extract TDD subgraph as reusable pattern",
       "description": "The reproduce → fix → refactor → review sequence is a general TDD pattern. Extract it as a subgraph that can be parameterized for different task types beyond bug fixing.",
-      "status": "idea",
-      "task_file": null
+      "status": "planned",
+      "task_file": "tasks/subgraph-generalization.md"
     },
     {
       "id": "repo-management",

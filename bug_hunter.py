@@ -31,6 +31,11 @@ from code_agent.tracking import (
     load_initial_state,
     persist_state,
 )
+from code_agent.tdd_subgraph import (
+    TDDConfig,
+    TaskType,
+    run_tdd_subgraph,
+)
 
 
 def merge_bugs(existing: dict[str, Bug], new: dict[str, Bug]) -> dict[str, Bug]:
@@ -73,27 +78,10 @@ class ClassifyResult(BaseModel):
     reasoning: str
 
 
-class ReproduceResult(BaseModel):
-    status: Literal["PREPARED_FOR_FIX", "DISCARDED"]
-    test_file_path: str | None
-    notes: str
-
-
-class FixResult(BaseModel):
-    status: Literal["READY_FOR_REVIEW", "DISCARDED"]
-    fix_description: str
-    notes: str
-
-
-class RefactorResult(BaseModel):
-    refactored: bool
-    notes: str
-
-
-class ReviewResult(BaseModel):
-    status: Literal["SOLVED", "PREPARED_FOR_FIX"]
-    rejection_reason: str | None
-    notes: str
+STRUCTURED_OUTPUT_RETRY_PROMPT = """
+Your previous response did not include the required structured output.
+Please provide your response again with the structured output format as specified.
+"""
 
 
 async def run_agent(
@@ -102,9 +90,10 @@ async def run_agent(
     output_schema: type[T] | None = None,
     cwd: str | None = None,
     allowed_tools: list[str] | None = None,
-    model: str = "sonnet",
+    model: str = "opus",
+    max_structured_output_retries: int = 2,
 ) -> T | None:
-    cwd_path = cwd or str(config.project_path)
+    cwd_path = cwd or os.path.join(str(config.project_path), config.subdir)
     base_cwd = os.getcwd()
     options = ClaudeAgentOptions(
         setting_sources=["project", "user"],
@@ -124,10 +113,19 @@ async def run_agent(
 
     async with ClaudeSDKClient(options=options) as client:
         await client.query(prompt=prompt)
-        async for message in client.receive_response():
-            _print_message(message)
-            if output_schema and hasattr(message, "structured_output"):
-                return output_schema.model_validate(message.structured_output)
+
+        for attempt in range(max_structured_output_retries + 1):
+            async for message in client.receive_response():
+                _print_message(message)
+                if output_schema and hasattr(message, "structured_output"):
+                    print("DEBUG: " + str(message.structured_output))
+                    return output_schema.model_validate(message.structured_output)
+
+            if output_schema and attempt < max_structured_output_retries:
+                print(
+                    f"Structured output not received, retrying ({attempt + 1}/{max_structured_output_retries})..."
+                )
+                await client.query(prompt=STRUCTURED_OUTPUT_RETRY_PROMPT)
 
     return None
 
@@ -352,25 +350,13 @@ def check_state(state: BugHunterState):
     bugs = state["bugs"]
     entrypoints = state["entrypoints"]
 
-    reviewable_bugs = [b for b in bugs.values() if b.status == "READY_FOR_REVIEW"]
-    if reviewable_bugs:
-        return "review_fix_node"
-
-    reproduced_bugs = [
-        b
-        for b in bugs.values()
-        if b.status == "PREPARED_FOR_FIX" and b.reproducibility_approach == "UNIT_TEST"
-    ]
-    if reproduced_bugs:
-        return "fix_unit_test_bug_node"
-
     unit_test_bugs = [
         b
         for b in bugs.values()
         if b.status == "IN_ANALYSIS" and b.reproducibility_approach == "UNIT_TEST"
     ]
     if unit_test_bugs:
-        return "reproduce_unit_test_bug_node"
+        return "tdd_bug_fix_node"
 
     high_severity_bugs = [
         b for b in bugs.values() if b.status == "POTENTIAL" and b.severity == "HIGH"
@@ -384,345 +370,70 @@ def check_state(state: BugHunterState):
     return "suggest_entrypoint_node"
 
 
-def review_requires_fix(state: BugHunterState):
-    bugs = state["bugs"]
-    fixes = state["fixes"]
-
-    prepared_bugs = [
-        b
-        for b in bugs.values()
-        if b.status == "PREPARED_FOR_FIX" and b.reproducibility_approach == "UNIT_TEST"
-    ]
-    bug_fixes = [fixes.get(b.id) for b in prepared_bugs]
-    rejected_fixes = [f for f in bug_fixes if f and f.status == "REJECTED"]
-    if rejected_fixes:
-        return "fix_unit_test_bug_node"
-    return "END"
-
-
-async def reproduce_unit_test_bug_node(state: BugHunterState) -> dict:
-    print("\n" + "=" * 60)
-    print(">>> REPRODUCE UNIT TEST BUG NODE <<<")
-    print("=" * 60 + "\n")
-
+async def tdd_bug_fix_node(state: BugHunterState) -> dict:
+    """Invokes TDD subgraph for bug fixing."""
     config = state["config"]
     bugs = state["bugs"]
     details = BugDetailsPersistence(config.state_path)
 
-    unit_test_bugs = [
+    bug = next(
         b
         for b in bugs.values()
         if b.status == "IN_ANALYSIS" and b.reproducibility_approach == "UNIT_TEST"
-    ]
-    bug = unit_test_bugs[0]
-    bug_details = details.load_bug_details(bug.id) or ""
-    worktree_dir = config.worktree_dir(bug.id)
+    )
 
     from code_agent.gitlab_utils import create_worktree_from_origin
 
+    worktree_dir = config.worktree_dir(bug.id)
     create_worktree_from_origin(
         worktree_path=worktree_dir, cwd=str(config.project_path)
     )
-    worktree_cwd = config.worktree_cwd(bug.id)
 
-    result = await run_agent(
-        config=config,
-        prompt=f"""
-            You are a bug reproduction agent. Your goal is to reproduce bugs by writing unit tests.
-            You have the following bug to reproduce:
-            {bug.model_dump_json()}
-
-            Details:
-            {bug_details}
-
-            You are on a git worktree created specifically for this bug at {worktree_dir}.
-
-            The unit tests should fail before the bug is fixed. Use the `testing-anti-patterns` skill to write good unit tests.
-
-            Once you have successfully reproduced the bug:
-            1. Commit your changes with a commit message that clearly indicates this is a reproduction of bug {bug.id}
-            2. Return status as 'PREPARED_FOR_FIX' with the test file path and notes
-
-            If the bug cannot be reproduced without a lot of setup or very complex steps:
-            1. Return status as 'DISCARDED' with the reason in notes
-        """,
-        output_schema=ReproduceResult,
-        cwd=worktree_cwd,
-        allowed_tools=["Skill", "Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+    tdd_config = TDDConfig(
+        task_id=bug.id,
+        task_type=TaskType.BUG_FIX,
+        worktree_path=config.worktree_cwd(bug.id),
+        description=bug.short_description,
+        details=details.load_bug_details(bug.id) or "",
+        relevant_files=bug.relevant_files,
     )
 
-    if result:
-        updated_bug = Bug(
-            id=bug.id,
-            short_description=bug.short_description,
-            severity=bug.severity,
-            status=result.status,
-            relevant_files=bug.relevant_files,
-            reproducibility_approach=bug.reproducibility_approach,
-            reproducibility_chance=bug.reproducibility_chance,
-            created_at=bug.created_at,
-        )
+    result = await run_tdd_subgraph(tdd_config)
 
-        reproduction_notes = f"\n\n## Reproduction Notes\n\n{result.notes}"
-        if result.test_file_path:
-            reproduction_notes += f"\nTest file: {result.test_file_path}"
-        details.save_bug_details(bug.id, bug_details + reproduction_notes)
+    bug_status: Literal["SOLVED", "DISCARDED"]
+    if result.status == "SUCCESS":
+        bug_status = "SOLVED"
+    else:
+        bug_status = "DISCARDED"
 
-        return {
-            "messages": [f"{bug.id} reproduction: {result.status}"],
-            "bugs": {bug.id: updated_bug},
-        }
-
-    return {"messages": ["Failed to reproduce bug."]}
-
-
-async def fix_unit_test_bug_node(state: BugHunterState) -> dict:
-    print("\n" + "=" * 60)
-    print(">>> FIX UNIT TEST BUG NODE <<<")
-    print("=" * 60 + "\n")
-
-    config = state["config"]
-    bugs = state["bugs"]
-    fixes = state["fixes"]
-    details = BugDetailsPersistence(config.state_path)
-
-    prepared_bugs = [
-        b
-        for b in bugs.values()
-        if b.status == "PREPARED_FOR_FIX" and b.reproducibility_approach == "UNIT_TEST"
-    ]
-    bug = prepared_bugs[0]
-    bug_details = details.load_bug_details(bug.id) or ""
-    potential_fix = fixes.get(bug.id)
-    worktree_dir = config.worktree_dir(bug.id)
-    worktree_cwd = config.worktree_cwd(bug.id)
-
-    existing_fix_info = ""
-    if potential_fix and potential_fix.status == "REJECTED":
-        existing_fix_info = (
-            f"\n\nPrevious fix was rejected:\nReason: {potential_fix.rejection_reason}"
-        )
-
-    result = await run_agent(
-        config=config,
-        prompt=f"""
-            You are a bug fixing agent. Your goal is to fix bugs that have been reproduced via a unit test.
-            You have the following bug to fix:
-            {bug.model_dump_json()}
-
-            Details:
-            {bug_details}{existing_fix_info}
-
-            You are on a git worktree created specifically for this bug at {worktree_dir}.
-
-            Unit tests that reproduce it have been added to the codebase. Your goal is to fix the bug by modifying the code so that these tests pass.
-
-            Once you have a first working solution, try to simplify the code changes as much as possible.
-            Then refactor the unit tests to fit the style of the project - describe the situation being tested, not bug IDs.
-
-            Use the `test-driven-development` and `testing-anti-patterns` skills.
-
-            Once you have successfully fixed the bug:
-            1. Commit your changes with a commit message indicating this is a fix for {bug.id}
-            2. Return status as 'READY_FOR_REVIEW' with a fix description and notes
-
-            If you cannot fix the bug or determine it's not actually a bug:
-            1. Return status as 'DISCARDED' with the reason in notes
-        """,
-        output_schema=FixResult,
-        cwd=worktree_cwd,
-        allowed_tools=["Skill", "Read", "Write", "Edit", "Bash", "Glob", "Grep"],
+    updated_bug = Bug(
+        id=bug.id,
+        short_description=bug.short_description,
+        severity=bug.severity,
+        status=bug_status,
+        relevant_files=bug.relevant_files,
+        reproducibility_approach=bug.reproducibility_approach,
+        reproducibility_chance=bug.reproducibility_chance,
+        created_at=bug.created_at,
     )
 
-    if result:
-        updated_bug = Bug(
-            id=bug.id,
-            short_description=bug.short_description,
-            severity=bug.severity,
-            status=result.status,
-            relevant_files=bug.relevant_files,
-            reproducibility_approach=bug.reproducibility_approach,
-            reproducibility_chance=bug.reproducibility_chance,
-            created_at=bug.created_at,
+    notes = f"\n\n## TDD Result\n\nStatus: {result.status}\n{result.notes}"
+    if result.rejection_history:
+        notes += "\n\nRejection history:\n" + "\n".join(
+            f"- {r}" for r in result.rejection_history
         )
+    details.save_bug_details(bug.id, (details.load_bug_details(bug.id) or "") + notes)
 
-        fix_notes = f"\n\n## Fix Notes\n\n{result.notes}\n\nFix description: {result.fix_description}"
-        details.save_bug_details(bug.id, bug_details + fix_notes)
+    state_update: dict = {
+        "messages": [f"{bug.id} TDD complete: {result.status}"],
+        "bugs": {bug.id: updated_bug},
+    }
 
-        state_update: dict = {
-            "messages": [f"{bug.id} fix: {result.status}"],
-            "bugs": {bug.id: updated_bug},
-        }
+    if result.status == "SUCCESS":
+        fix = BugFix(bug_id=bug.id, status="FINISHED")
+        state_update["fixes"] = {bug.id: fix}
 
-        if result.status == "READY_FOR_REVIEW":
-            fix = BugFix(bug_id=bug.id, status="IN_REVIEW")
-            state_update["fixes"] = {bug.id: fix}
-
-        return state_update
-
-    return {"messages": ["Failed to fix bug."]}
-
-
-async def refactor_fix_node(state: BugHunterState) -> dict:
-    print("\n" + "=" * 60)
-    print(">>> REFACTOR FIX NODE <<<")
-    print("=" * 60 + "\n")
-
-    config = state["config"]
-    bugs = state["bugs"]
-    details = BugDetailsPersistence(config.state_path)
-
-    reviewable_bugs = [
-        b
-        for b in bugs.values()
-        if b.status == "READY_FOR_REVIEW" and b.reproducibility_approach == "UNIT_TEST"
-    ]
-    bug = reviewable_bugs[0]
-    bug_details = details.load_bug_details(bug.id) or ""
-    worktree_dir = config.worktree_dir(bug.id)
-    worktree_cwd = config.worktree_cwd(bug.id)
-
-    result = await run_agent(
-        config=config,
-        prompt=f"""
-            You are a code refactoring agent. Your goal is to simplify and clean up code that was written during bug fixing.
-
-            Bug context:
-            {bug.model_dump_json()}
-
-            Details:
-            {bug_details}
-
-            You are on a git worktree at {worktree_dir} that contains the fix.
-
-            Your tasks:
-
-            1. SIMPLIFY PRODUCTION CODE:
-               - Remove any unnecessary complexity introduced during the fix
-               - Consolidate duplicate logic
-               - Improve naming for clarity
-               - Remove dead code paths
-               - Keep changes minimal and focused
-
-            2. TRANSFORM TESTS FROM TDD TO MAINTAINABLE:
-               The unit tests were written in TDD style to drive the implementation.
-               Now that the code works, transform them into maintainable tests:
-               - Remove test scaffolding that was only needed to drive development
-               - Consolidate redundant test cases that test the same behavior
-               - Focus tests on documenting behavior, not implementation details
-               - Remove tests that only verify mock behavior (anti-pattern)
-               - Ensure tests describe the "what" not the "how"
-
-            3. ENSURE TESTS STILL PASS:
-               Run the tests after refactoring to ensure nothing broke.
-
-            Use the `testing-anti-patterns` skill for guidance on good test practices.
-            Commit your refactoring changes with a clear commit message.
-        """,
-        output_schema=RefactorResult,
-        cwd=worktree_cwd,
-        allowed_tools=["Skill", "Read", "Write", "Edit", "Bash", "Glob", "Grep"],
-    )
-
-    if result:
-        refactor_notes = f"\n\n## Refactor Notes\n\n{result.notes}"
-        details.save_bug_details(bug.id, bug_details + refactor_notes)
-        return {"messages": [f"{bug.id} refactored: {result.refactored}"]}
-
-    return {"messages": ["Refactoring completed."]}
-
-
-async def review_fix_node(state: BugHunterState) -> dict:
-    print("\n" + "=" * 60)
-    print(">>> REVIEW FIX NODE <<<")
-    print("=" * 60 + "\n")
-
-    config = state["config"]
-    bugs = state["bugs"]
-    fixes = state["fixes"]
-    details = BugDetailsPersistence(config.state_path)
-
-    reviewable_bugs = [
-        b
-        for b in bugs.values()
-        if b.status == "READY_FOR_REVIEW" and b.reproducibility_approach == "UNIT_TEST"
-    ]
-    bug = reviewable_bugs[0]
-    bug_details = details.load_bug_details(bug.id) or ""
-    worktree_dir = config.worktree_dir(bug.id)
-
-    result = await run_agent(
-        config=config,
-        prompt=f"""
-            The following bug was first reproduced and a fix for it was implemented:
-            {bug.model_dump_json()}
-
-            Details:
-            {bug_details}
-
-            You are on a git worktree created specifically for this bug at {worktree_dir} that contains the reproduction and the fix.
-            Review the code changes carefully. Use the git diff command to see the changes made.
-            The commit messages state what commits introduced the reproduction and what commits introduced the fix.
-
-            Check if the fix is addressing the whole bug or whether this requires further changes.
-            In addition, check if the code changes are following best practices and the style of the project.
-
-            If further changes are required:
-            - Return status as 'PREPARED_FOR_FIX' with rejection_reason explaining what needs to change
-
-            If the bug is fully fixed:
-            - Return status as 'SOLVED' with notes about the review
-
-            Focus solely on this bug and do not branch out to other issues.
-        """,
-        output_schema=ReviewResult,
-        cwd=worktree_dir,
-        allowed_tools=["Read", "Bash", "Glob", "Grep"],
-    )
-
-    if result:
-        review_notes = f"\n\n## Review Notes\n\n{result.notes}"
-        details.save_bug_details(bug.id, bug_details + review_notes)
-
-        updated_bug = Bug(
-            id=bug.id,
-            short_description=bug.short_description,
-            severity=bug.severity,
-            status=result.status,
-            relevant_files=bug.relevant_files,
-            reproducibility_approach=bug.reproducibility_approach,
-            reproducibility_chance=bug.reproducibility_chance,
-            created_at=bug.created_at,
-        )
-
-        state_update: dict = {
-            "messages": [f"{bug.id} review: {result.status}"],
-            "bugs": {bug.id: updated_bug},
-        }
-
-        existing_fix = fixes.get(bug.id)
-        if existing_fix:
-            if result.status == "SOLVED":
-                updated_fix = BugFix(
-                    bug_id=existing_fix.bug_id,
-                    status="FINISHED",
-                    rejection_reason=existing_fix.rejection_reason,
-                    created_at=existing_fix.created_at,
-                    manual_adjustments=existing_fix.manual_adjustments,
-                )
-            else:
-                updated_fix = BugFix(
-                    bug_id=existing_fix.bug_id,
-                    status="REJECTED",
-                    rejection_reason=result.rejection_reason,
-                    created_at=existing_fix.created_at,
-                    manual_adjustments=existing_fix.manual_adjustments,
-                )
-            state_update["fixes"] = {bug.id: updated_fix}
-
-        return state_update
-
-    return {"messages": ["Review completed."]}
+    return state_update
 
 
 workflow = StateGraph(BugHunterState)
@@ -730,19 +441,13 @@ workflow = StateGraph(BugHunterState)
 workflow.add_node(suggest_entrypoint_node)
 workflow.add_node(scout_node)
 workflow.add_node(classify_bug_candidate_node)
-workflow.add_node(reproduce_unit_test_bug_node)
-workflow.add_node(fix_unit_test_bug_node)
-workflow.add_node(refactor_fix_node)
-workflow.add_node(review_fix_node)
+workflow.add_node(tdd_bug_fix_node)
 
 workflow.add_conditional_edges(START, check_state)
 workflow.add_conditional_edges("suggest_entrypoint_node", check_state)
 workflow.add_edge("scout_node", "classify_bug_candidate_node")
 workflow.add_conditional_edges("classify_bug_candidate_node", check_state)
-workflow.add_conditional_edges("reproduce_unit_test_bug_node", check_state)
-workflow.add_edge("fix_unit_test_bug_node", "refactor_fix_node")
-workflow.add_edge("refactor_fix_node", "review_fix_node")
-workflow.add_conditional_edges("review_fix_node", review_requires_fix)
+workflow.add_conditional_edges("tdd_bug_fix_node", check_state)
 
 
 def parse_args() -> argparse.Namespace:
