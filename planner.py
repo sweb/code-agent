@@ -1,5 +1,6 @@
 import argparse
 import os
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -64,18 +65,21 @@ async def select_task_node(state: PlannerState) -> dict:
     tasks = load_tasks(config.tasks_path)
 
     ideas = [t for t in tasks.ideas if t.status == "idea"]
-    if not ideas:
-        print("No ideas found in tasks.json")
-        sys.exit(0)
 
     print("\nAvailable Ideas:")
-    for idx, task in enumerate(ideas):
-        print(f"{idx + 1}. {task.title} ({task.id})")
+    if ideas:
+        for idx, task in enumerate(ideas):
+            print(f"{idx + 1}. {task.title} ({task.id})")
+    else:
+        print("(No existing ideas found)")
+
+    create_option_idx = len(ideas) + 1
+    print(f"{create_option_idx}. [Create New Idea]")
 
     choice = -1
-    while choice < 1 or choice > len(ideas):
+    while choice < 1 or choice > create_option_idx:
         try:
-            print(f"\nSelect a task number (1-{len(ideas)}): ", end="", flush=True)
+            print(f"\nSelect an option (1-{create_option_idx}): ", end="", flush=True)
             inp = await anyio.to_thread.run_sync(sys.stdin.readline)
             if not inp:
                 sys.exit(0)
@@ -83,9 +87,43 @@ async def select_task_node(state: PlannerState) -> dict:
         except ValueError:
             pass
 
-    selected_task = ideas[choice - 1]
-    print(f"\nSelected: {selected_task.title}")
-    print(f"Description: {selected_task.description}\n")
+    if choice == create_option_idx:
+        print("\nCreating new idea:")
+        print("Title: ", end="", flush=True)
+        title = (await anyio.to_thread.run_sync(sys.stdin.readline)).strip()
+        if not title:
+            print("Title is required.")
+            sys.exit(0)
+
+        print("Description: ", end="", flush=True)
+        description = (await anyio.to_thread.run_sync(sys.stdin.readline)).strip()
+
+        # ID generation
+        slug = re.sub(r'[^a-z0-9]+', '-', title.lower()).strip('-')
+        if not slug:
+            slug = f"idea-{len(tasks.ideas) + 1}"
+
+        existing_ids = {t.id for t in tasks.ideas}
+        base_slug = slug
+        counter = 1
+        while slug in existing_ids:
+            slug = f"{base_slug}-{counter}"
+            counter += 1
+
+        selected_task = Task(
+            id=slug,
+            title=title,
+            description=description,
+            status="idea"
+        )
+        tasks.ideas.append(selected_task)
+        save_tasks(config.tasks_path, tasks)
+        print(f"\nCreated new idea: {selected_task.title} ({selected_task.id})\n")
+
+    else:
+        selected_task = ideas[choice - 1]
+        print(f"\nSelected: {selected_task.title}")
+        print(f"Description: {selected_task.description}\n")
 
     return {
         "tasks": tasks,
@@ -123,7 +161,6 @@ async def ideate_node(state: PlannerState) -> dict:
     )
 
     async with ClaudeSDKClient(options=options) as client:
-        # Initial kick-off
         await client.query("Introduce yourself and ask the first clarification question.")
 
         while True:
@@ -138,9 +175,7 @@ async def ideate_node(state: PlannerState) -> dict:
                 await client.query("Please respond using the correct structured format.")
                 continue
 
-            # Check if spec is generated
             if turn_data.spec_content and turn_data.spec_filename:
-                # Save spec
                 os.makedirs(config.tasks_dir, exist_ok=True)
                 filepath = os.path.join(config.tasks_dir, turn_data.spec_filename)
 
@@ -149,7 +184,6 @@ async def ideate_node(state: PlannerState) -> dict:
 
                 print(f"\nSpecification saved to {filepath}")
 
-                # Update task status
                 tasks = state["tasks"]
                 updated_ideas = []
                 for t in tasks.ideas:
@@ -162,7 +196,6 @@ async def ideate_node(state: PlannerState) -> dict:
 
                 return {"spec_content": turn_data.spec_content}
 
-            # Check if ready to spec
             if turn_data.ready_to_generate_spec:
                 print(f"\nAgent: {turn_data.message_to_user}")
                 print("\nAgent is ready to generate the spec. Proceed? (y/n): ", end="", flush=True)
@@ -177,7 +210,6 @@ async def ideate_node(state: PlannerState) -> dict:
                     await client.query("User wants to continue discussion. Ask what is missing.")
                 continue
 
-            # Normal conversation
             print(f"\nAgent: {turn_data.message_to_user}")
 
             print("\nYou: ", end="", flush=True)
