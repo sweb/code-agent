@@ -26,10 +26,10 @@ from code_agent.checkpointing import (
 )
 from code_agent.tracking import (
     Bug,
-    BugDetailsPersistence,
     BugFix,
-    load_initial_state,
-    persist_state,
+    BugHunterNotebook,
+    Bugs,
+    BugFixes,
 )
 from code_agent.tdd_subgraph import (
     TDDConfig,
@@ -208,15 +208,13 @@ async def scout_node(state: BugHunterState) -> dict:
     config = state["config"]
     bugs = state["bugs"]
     entrypoints = state["entrypoints"]
-    details = BugDetailsPersistence(config.state_path)
+    notebook = BugHunterNotebook(config.state_path)
 
     if not entrypoints:
         return {"messages": ["No entrypoints to scout."]}
 
     entrypoint = entrypoints[0]
     remaining = entrypoints[1:]
-
-    from code_agent.tracking import Bugs
 
     bugs_json = Bugs(bugs=bugs).model_dump_json()
 
@@ -267,7 +265,7 @@ async def scout_node(state: BugHunterState) -> dict:
                 relevant_files=scout_bug.relevant_files,
             )
             new_bugs[bug_id] = bug
-            details.save_bug_details(bug_id=bug.id, details=scout_bug.details)
+            notebook.save_bug_details(bug_id=bug.id, details=scout_bug.details)
         return {
             "messages": [result.exploration_summary],
             "bugs": new_bugs,
@@ -287,7 +285,7 @@ async def classify_bug_candidate_node(state: BugHunterState) -> dict:
 
     config = state["config"]
     bugs = state["bugs"]
-    details = BugDetailsPersistence(config.state_path)
+    notebook = BugHunterNotebook(config.state_path)
 
     potential_bugs = [
         b for b in bugs.values() if b.status == "POTENTIAL" and b.severity == "HIGH"
@@ -296,7 +294,7 @@ async def classify_bug_candidate_node(state: BugHunterState) -> dict:
         return {"messages": ["No potential high severity bugs found."]}
 
     chosen_bug = potential_bugs[0]
-    bug_details = details.load_bug_details(chosen_bug.id) or ""
+    bug_details = notebook.load_bug_details(chosen_bug.id) or ""
 
     result = await run_agent(
         config=config,
@@ -334,7 +332,7 @@ async def classify_bug_candidate_node(state: BugHunterState) -> dict:
         )
 
         classification_summary = f"\n\n## Classification Summary\n\n{result.reasoning}"
-        details.save_bug_details(chosen_bug.id, bug_details + classification_summary)
+        notebook.save_bug_details(chosen_bug.id, bug_details + classification_summary)
 
         return {
             "messages": [
@@ -374,7 +372,7 @@ async def tdd_bug_fix_node(state: BugHunterState) -> dict:
     """Invokes TDD subgraph for bug fixing."""
     config = state["config"]
     bugs = state["bugs"]
-    details = BugDetailsPersistence(config.state_path)
+    notebook = BugHunterNotebook(config.state_path)
 
     bug = next(
         b
@@ -394,7 +392,7 @@ async def tdd_bug_fix_node(state: BugHunterState) -> dict:
         task_type=TaskType.BUG_FIX,
         worktree_path=config.worktree_cwd(bug.id),
         description=bug.short_description,
-        details=details.load_bug_details(bug.id) or "",
+        details=notebook.load_bug_details(bug.id) or "",
         relevant_files=bug.relevant_files,
     )
 
@@ -422,7 +420,7 @@ async def tdd_bug_fix_node(state: BugHunterState) -> dict:
         notes += "\n\nRejection history:\n" + "\n".join(
             f"- {r}" for r in result.rejection_history
         )
-    details.save_bug_details(bug.id, (details.load_bug_details(bug.id) or "") + notes)
+    notebook.save_bug_details(bug.id, (notebook.load_bug_details(bug.id) or "") + notes)
 
     state_update: dict = {
         "messages": [f"{bug.id} TDD complete: {result.status}"],
@@ -520,23 +518,23 @@ async def main():
                 initial_state = None
             else:
                 thread_id = generate_thread_id()
-                bugs, fixes, entrypoints = load_initial_state(config.state_path)
+                notebook = BugHunterNotebook(config.state_path)
                 initial_state = {
                     "messages": ["Starting the bug hunt"],
                     "config": config,
-                    "bugs": bugs,
-                    "fixes": fixes,
-                    "entrypoints": entrypoints,
+                    "bugs": notebook.bugs.bugs,
+                    "fixes": notebook.fixes.fixes,
+                    "entrypoints": notebook.entrypoints,
                 }
         else:
             thread_id = generate_thread_id()
-            bugs, fixes, entrypoints = load_initial_state(config.state_path)
+            notebook = BugHunterNotebook(config.state_path)
             initial_state = {
                 "messages": ["Starting the bug hunt"],
                 "config": config,
-                "bugs": bugs,
-                "fixes": fixes,
-                "entrypoints": entrypoints,
+                "bugs": notebook.bugs.bugs,
+                "fixes": notebook.fixes.fixes,
+                "entrypoints": notebook.entrypoints,
             }
 
         save_thread_id(config.state_path, thread_id)
@@ -555,12 +553,13 @@ async def main():
             run_completed = True
         finally:
             if final_state:
-                persist_state(
-                    config.state_path,
-                    final_state["bugs"],
-                    final_state["fixes"],
-                    final_state["entrypoints"],
-                )
+                notebook = BugHunterNotebook(config.state_path)
+                notebook.bugs = Bugs(bugs=final_state["bugs"])
+                notebook.fixes = BugFixes(fixes=final_state["fixes"])
+                notebook.entrypoints = final_state["entrypoints"]
+                notebook.save_bugs()
+                notebook.save_fixes()
+                notebook.save_entrypoints()
             if run_completed:
                 clear_thread_id(config.state_path)
 
