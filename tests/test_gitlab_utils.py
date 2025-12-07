@@ -114,7 +114,7 @@ def test_create_worktree_from_origin_fetches_and_creates_worktree():
 
     assert calls[1][0][0] == ["git", "remote", "show", "origin"]
 
-    assert calls[2][0][0] == ["git", "worktree", "add", "/tmp/worktree", "origin/main"]
+    assert calls[2][0][0] == ["git", "worktree", "add", "-b", "worktree", "/tmp/worktree", "origin/main"]
     assert calls[2][1]["cwd"] is None
 
     assert result == "/tmp/worktree"
@@ -128,7 +128,7 @@ def test_create_worktree_from_origin_uses_master_when_default():
         result = create_worktree_from_origin("/tmp/worktree")
 
     calls = mock_run.call_args_list
-    assert calls[2][0][0] == ["git", "worktree", "add", "/tmp/worktree", "origin/master"]
+    assert calls[2][0][0] == ["git", "worktree", "add", "-b", "worktree", "/tmp/worktree", "origin/master"]
 
 
 def test_create_worktree_from_origin_uses_cwd_parameter():
