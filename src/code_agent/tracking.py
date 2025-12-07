@@ -66,54 +66,8 @@ class BugFixes(BaseModel):
     fixes: dict[str, BugFix]
 
 
-class BugDetailsPersistence:
-    def __init__(self, path: str):
-        self.path = path
-
-    def load_bug_details(self, bug_id: str) -> str | None:
-        detail_path = os.path.join(self.path, BUGS_DIRNAME, f"{bug_id}.md")
-        if os.path.exists(detail_path):
-            with open(detail_path, "r") as f:
-                return f.read()
-        return None
-
-    def save_bug_details(self, bug_id: str, details: str):
-        detail_path = os.path.join(self.path, BUGS_DIRNAME, f"{bug_id}.md")
-        os.makedirs(os.path.dirname(detail_path), exist_ok=True)
-        with open(detail_path, "w") as f:
-            f.write(details)
-
-
-def load_initial_state(state_path: str) -> tuple[dict[str, Bug], dict[str, BugFix], list[str]]:
-    bugs = load_json_model(
-        os.path.join(state_path, BUGS_FILENAME), Bugs, Bugs(bugs={})
-    ).bugs
-
-    fixes = load_json_model(
-        os.path.join(state_path, FIXES_FILENAME), BugFixes, BugFixes(fixes={})
-    ).fixes
-
-    entrypoints: list[str] = []
-
-    entrypoints_path = os.path.join(state_path, ENTRYPOINTS_FILENAME)
-    if os.path.exists(entrypoints_path):
-        with open(entrypoints_path, "r") as f:
-            entrypoints = json.loads(f.read())
-
-    return bugs, fixes, entrypoints
-
-
-def persist_state(
-    state_path: str,
-    bugs: dict[str, Bug],
-    fixes: dict[str, BugFix],
-    entrypoints: list[str],
-):
-    save_json_model(os.path.join(state_path, BUGS_FILENAME), Bugs(bugs=bugs))
-    save_json_model(os.path.join(state_path, FIXES_FILENAME), BugFixes(fixes=fixes))
-
-    with open(os.path.join(state_path, ENTRYPOINTS_FILENAME), "w") as f:
-        f.write(json.dumps(entrypoints, indent=2))
+class Entrypoints(BaseModel):
+    entrypoints: list[str]
 
 
 class BugHunterNotebook:
@@ -152,6 +106,12 @@ class BugHunterNotebook:
     def save_fixes(self):
         save_json_model(os.path.join(self.path, FIXES_FILENAME), self.fixes)
 
+    def save_entrypoints(self):
+        save_json_model(
+            os.path.join(self.path, ENTRYPOINTS_FILENAME),
+            Entrypoints(entrypoints=self.entrypoints),
+        )
+
     def add_or_update_bug(self, bug_id: str, bug: Bug):
         bug.updated_at = datetime.now()
         bugs = {**self.bugs.bugs, bug_id: bug}
@@ -165,28 +125,25 @@ class BugHunterNotebook:
 
     def add_entrypoints(self, path: list[str]) -> None:
         self.entrypoints.extend(path)
-        with open(os.path.join(self.path, ENTRYPOINTS_FILENAME), "w") as f:
-            f.write(json.dumps(self.entrypoints, indent=2))
+        self.save_entrypoints()
 
     def load_entrypoints(self) -> list[str]:
-        entrypoints_path = os.path.join(self.path, ENTRYPOINTS_FILENAME)
-        if os.path.exists(entrypoints_path):
-            with open(entrypoints_path, "r") as f:
-                return json.loads(f.read())
-        return []
+        return load_json_model(
+            os.path.join(self.path, ENTRYPOINTS_FILENAME),
+            Entrypoints,
+            Entrypoints(entrypoints=[]),
+        ).entrypoints
 
     def pop_entrypoint(self) -> str | None:
         if not self.entrypoints:
             return None
         entrypoint = self.entrypoints.pop(0)
-        with open(os.path.join(self.path, ENTRYPOINTS_FILENAME), "w") as f:
-            f.write(json.dumps(self.entrypoints, indent=2))
+        self.save_entrypoints()
         return entrypoint
 
     def clear(self) -> None:
         self.entrypoints = []
-        with open(os.path.join(self.path, ENTRYPOINTS_FILENAME), "w") as f:
-            f.write(json.dumps(self.entrypoints, indent=2))
+        self.save_entrypoints()
 
         bug_ids_to_remove = [
             bug_id
